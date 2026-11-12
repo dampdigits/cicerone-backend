@@ -9,7 +9,7 @@ ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",") if os.getenv("ALLOWED
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTE_MODEL") or os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini"
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or os.getenv("OPENROUTER_MODEL") or "GPT-6-Luna"
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 INSTALLED_APPS = [

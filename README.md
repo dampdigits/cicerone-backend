@@ -1,77 +1,93 @@
 # Cicerone
 
-Cicerone is a Django backend that researches a provider's OAuth setup requirements from official documentation and turns that research into a clear, structured guide.
+Cicerone is a Django backend that researches how to set up an OAuth application with a third-party provider. It reads the provider's **official documentation** and turns it into a structured, evidence-backed setup guide.
 
-The API accepts a provider name and optional documentation URL, runs the research pipeline, and returns:
+Given a provider name (and optionally a documentation URL), it returns:
 
-- a human-readable Markdown guide
-- a JSON payload for frontend rendering
+- a human-readable **Markdown guide**
+- a **JSON payload** for a frontend to render
 
-## Project goal
+It is meant to sit behind a frontend that presents the guide with a richer interface.
 
-Given a provider name or documentation URL, Cicerone:
+## What it produces
 
-- discovers official documentation pages
-- extracts relevant page content
-- analyzes the content for OAuth-specific requirements
-- builds a setup workflow with dependencies, approvals, and gaps
-- returns both a Markdown guide and machine-readable JSON
+For each provider, the guide covers:
 
-This project is intended to be the backend behind a frontend that presents the resulting guide with a richer interface.
+- the **workflow**: ordered steps with sub-steps, dependencies between steps, and time estimates
+- **approvals**: gates where someone other than the developer must approve something (admin consent, app review, publisher verification), with who approves and how long it may take
+- **roadblocks** and their mitigations
+- **dependencies**: accounts, permissions, tools and prior setup needed first
+- a **difficulty** rating (1 to 5, the model's estimate; docs do not rate difficulty)
+- **topic coverage** across nine OAuth topics, and an explicit list of **gaps** (things the sources do not say)
 
 ## Tech stack
 
-- Django
-- Django REST Framework
-- Tavily API
-- OpenRouter API
 - Python 3.13
+- Django and Django REST Framework
+- [Tavily](https://tavily.com) for search, site mapping and page extraction
+- [OpenRouter](https://openrouter.ai) for model analysis
 
 ## Repository layout
 
-- `cicerone/` — Django project settings and routing
-- `oauth_research/` — API views, async job queue, and research pipeline
-- `provider_info.py` — built-in provider registry and domain metadata
-- `manage.py` — Django management entry point
-- `.env` — environment variables for Tavily and OpenRouter
-- `Pipfile` — Python dependency declaration
+- `cicerone/`: Django project settings and routing
+- `oauth_research/services.py`: `ResearchPipeline`, the whole research flow
+- `oauth_research/tasks.py`: job queue (`create_job`, `get_job`, `JobQueueFull`, `TERMINAL`)
+- `oauth_research/views.py`: API views and request validation
+- `provider_info.py`: built-in provider registry (official domains, seeds, path filters)
+- `manage.py`: Django management entry point
+- `.env`: API keys and model settings
+- `Pipfile`: dependencies
 
 ## Local setup
 
-### 1) Create and activate the environment
+### 1. Install dependencies
 
 ```bash
-cd /home/dampdigits/projects/dampdigits/cicerone
 pipenv install
 pipenv shell
 ```
 
-### 2) Configure environment variables
+### 2. Configure environment variables
 
-Create or update a `.env` file in the project root with:
+Create a `.env` file in the project root:
 
 ```env
 TAVILY_API_KEY=your_tavily_key
 OPENROUTER_API_KEY=your_openrouter_key
-OPENROUTE_MODEL=GPT-6-Luna
+OPENROUTER_MODEL=openai/gpt-6-luna
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 ```
 
-The app also supports the fallback variable name `OPENROUTER_MODEL` if used elsewhere.
+| Variable | Required | Default |
+|---|---|---|
+| `TAVILY_API_KEY` | Yes | none |
+| `OPENROUTER_API_KEY` | Yes, except for `dry_run` requests | none |
+| `OPENROUTER_MODEL` | No | `openai/gpt-6-luna` |
+| `OPENROUTER_BASE_URL` | No | `https://openrouter.ai/api/v1` |
 
-### 3) Apply Django database migrations
+Each value is read from the environment first, then from Django settings of the same name.
 
-```bash
-pipenv run python manage.py migrate
-```
+### 3. Configure a shared cache
 
-### 4) Start the backend
+Job state is stored in Django's cache, so every web worker can see it. This only works with a **shared** backend (Redis, Memcached, database or file cache). The default `LocMemCache` is per process: it works for a single local dev server but jobs will appear to vanish when more than one worker runs.
+
+### 4. Start the backend
 
 ```bash
 pipenv run python manage.py runserver 0.0.0.0:8000
 ```
 
-## API endpoints
+No database migrations are needed for Cicerone itself. Run `migrate` only if your project's auth or other apps require it.
+
+## Authentication and cost control
+
+Every research run spends paid Tavily and OpenRouter credits.
+
+> **Current state:** `ResearchAPIView` and `JobStatusView` both set `permission_classes = []`, and the throttle settings are commented out. Anyone who can reach the server can start runs. Before deploying, enable authentication (for example `IsAuthenticated` or an API-key permission) and DRF throttling (the code includes a commented `research_create` scope example, for instance `10/hour`).
+
+Job ownership is keyed on `request.user.pk`. With anonymous access every caller shares the same owner value, so per-user job isolation only works once authentication is on.
+
+## API
 
 ### Health check
 
@@ -79,16 +95,11 @@ pipenv run python manage.py runserver 0.0.0.0:8000
 curl http://127.0.0.1:8000/healthz/
 ```
 
-Example response:
-
 ```json
-{
-  "status": "ok",
-  "service": "cicerone"
-}
+{ "status": "ok", "service": "cicerone" }
 ```
 
-### Research request
+### Start a research job
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/research/ \
@@ -99,13 +110,49 @@ curl -X POST http://127.0.0.1:8000/api/research/ \
   }'
 ```
 
-Example response:
+Response `202 Accepted`:
 
 ```json
 {
   "job_id": "7bba7f23-5ec1-4d86-bd03-a147f48f7ad6",
   "status": "queued",
-  "message": "Provider research job accepted and running."
+  "poll_after_seconds": 2,
+  "message": "Provider research job accepted."
+}
+```
+
+Error responses:
+
+| Status | When |
+|---|---|
+| `400` | Invalid body (per-field messages) or the pipeline rejected the provider name |
+| `503` | Queue is full; includes a `Retry-After: 30` header |
+
+### Request body
+
+| Field | Type | Notes |
+|---|---|---|
+| `provider` | string, required | Provider name, max 80 characters (letters, digits, spaces and `. & + ' -`). `provider_name` is accepted as an alias. |
+| `doc_url` | string, optional | Public `https` documentation URL, used as the first seed. |
+| `domains` | list of strings, optional | Allowed official domains (max 10). Used for providers not in the registry. |
+| `seeds` | list of URLs, optional | Extra seed URLs (max 10). |
+| `select_paths` | list of regex strings, optional | Path filters for site mapping (max 10, each up to 200 characters). |
+| `exclude_paths` | list of regex strings, optional | Path exclusions for site mapping (max 10). |
+| `max_urls` | integer, optional | Pages to extract, 5 to 60. Default 30. |
+| `dry_run` | boolean, optional | Runs discovery only and returns the URLs it would extract. No pages are fetched and no model calls are made, so `OPENROUTER_API_KEY` is not needed. |
+
+Example with overrides for a provider not in the registry:
+
+```json
+{
+  "provider": "acme",
+  "doc_url": "https://docs.acme.com/oauth",
+  "domains": ["docs.acme.com"],
+  "seeds": ["https://docs.acme.com/oauth/apps"],
+  "select_paths": ["/oauth/.*"],
+  "exclude_paths": [".*pricing.*"],
+  "max_urls": 30,
+  "dry_run": false
 }
 ```
 
@@ -115,83 +162,117 @@ Example response:
 curl http://127.0.0.1:8000/api/jobs/7bba7f23-5ec1-4d86-bd03-a147f48f7ad6/status/
 ```
 
-Example response:
+While running:
 
 ```json
 {
   "job_id": "7bba7f23-5ec1-4d86-bd03-a147f48f7ad6",
-  "status": "completed",
+  "status": "running",
   "provider": "github",
-  "result": {
-    "status": "completed",
-    "provider": "github",
-    "json": {
-      "provider": "github",
-      "slug": "github",
-      "workflow": {
-        "workflow": [],
-        "approvals": [],
-        "gaps": []
-      }
-    },
-    "markdown": "# GitHub OAuth Setup Guide\n..."
-  }
+  "stage": "extracting",
+  "stage_detail": "pages 1-20 of 30",
+  "finished": false,
+  "poll_after_seconds": 3
 }
 ```
 
-## Request contract
+When finished, the response has `"finished": true` and a `result` object. An unknown, expired or someone else's job returns `404`. Responses are sent with `Cache-Control: no-store`.
 
-The main request body to `POST /api/research/` accepts:
+**Statuses:** `queued`, `running`, `completed`, `partial`, `failed`, `dry_run`. The last four are terminal.
+
+- `completed`: everything ran without recorded errors
+- `partial`: a result exists, but some part failed (see `errors`)
+- `failed`: nothing usable, or the model provider rejected the credentials or credits (401, 402, 403)
+- `dry_run`: discovery only
+
+**Stages** (for a progress label): `resolving`, `discovering`, `extracting`, `analyzing topics`, `building workflow`.
+
+If an internal error occurs, the status response carries a generic `error` message with a reference id; the traceback goes to the server log.
+
+### Result shape
+
+`result` contains:
 
 ```json
 {
+  "status": "completed",
   "provider": "github",
-  "doc_url": "https://docs.github.com/en/apps/oauth-apps",
-  "domains": ["docs.github.com"],
-  "seeds": ["https://docs.github.com/en/apps/oauth-apps"],
-  "select_paths": ["/en/apps/.*"],
-  "exclude_paths": [".*pricing.*"],
-  "max_urls": 30,
-  "dry_run": false
+  "json": { "...": "see below" },
+  "markdown": "# GitHub: OAuth app setup guide\n...",
+  "errors": [],
+  "warnings": []
 }
 ```
 
-### Fields
+`result.json` includes:
 
-- `provider` (required): provider name such as `github`, `google`, `microsoft`, or a custom provider name
-- `doc_url` (optional): direct documentation URL to use as an initial seed
-- `domains` (optional): allowed official domains for the provider
-- `seeds` (optional): explicit seed URLs to include for discovery
-- `select_paths` (optional): path filters for search/crawl logic
-- `exclude_paths` (optional): path exclusions for search/crawl logic
-- `max_urls` (optional): cap the number of pages extracted
-- `dry_run` (optional): if enabled, the job can prepare the research without finalizing the full output path
+| Key | Contents |
+|---|---|
+| `provider`, `slug`, `display_name`, `status`, `model`, `retrieved_at` | Run identity and timing |
+| `auto_detected` | `true` if the official domains were guessed rather than confirmed |
+| `config` | Resolved `domains`, `seeds`, `select_paths`, `exclude_paths`, `domain_source` |
+| `source_urls`, `discovery` | URLs selected, and counts for candidates, off-domain rejections and selected |
+| `pages` | Each extracted page: `url`, `title`, `chars`, `sha256`, `last_updated_hint` |
+| `failed_fetches`, `thin_pages` | Pages that could not be fetched, or had too little text |
+| `facts` | `topics` (per-topic status and verified requirements) and `gaps` |
+| `workflow` | `workflow` (steps), `approvals`, `difficulty`, `roadblocks`, `dependencies`, `gaps`, `totals` |
+| `usage` | Prompt and completion token counts |
+| `errors`, `warnings`, `markdown` | Problems, notes, and the rendered guide |
 
-## Backend behavior
+## How the pipeline works
 
-The backend is designed to process a single-provider request in a single orchestrated flow:
+1. **Resolve config.** Providers in `provider_info.py` use the registry's domains, seeds and path filters, and user input cannot widen them. Unknown providers use the supplied `domains`, `seeds` and `doc_url`. If none are given, Cicerone searches for the official docs site and flags the guess for a person to confirm.
+2. **Discover URLs.** One Tavily search per topic, restricted to the allowed domains, plus a Tavily map of each seed. Anything outside the domain allowlist is dropped in code.
+3. **Rank and cap.** Seeds first, then pages found by more topics, higher search score and more OAuth-related URL hints, up to `max_urls`.
+4. **Extract.** Full page text via Tavily, in batches of 20. If a batch fails, each URL is retried on its own. Redirects that leave the allowlist are rejected, and pages under 300 characters are set aside.
+5. **Analyze nine topics.** For each topic, the best-matching pages (3 per pass, up to 2 passes) go to the model with a strict evidence-first prompt. Topics: `account_requirements`, `registration`, `redirect_uri`, `credentials`, `scopes`, `consent`, `verification`, `production`, `limits`.
+6. **Build the workflow.** The five most workflow-relevant pages and the already verified facts go to the model, which returns steps, approvals, difficulty, roadblocks and dependencies.
+7. **Compute totals and render.** Time and wait totals are summed in code, and the Markdown guide is rendered.
 
-1. Discover candidate URLs using Tavily search
-2. Extract the relevant pages and their full content
-3. Analyze the extracted pages with the OpenRouter model using a strict evidence-first prompt
-4. Build the final workflow and return JSON + Markdown output
+### Evidence rules
 
-The system is intentionally strict:
+The system is deliberately strict:
 
-- no memory-only filling of missing facts
-- missing information is tracked as a gap
-- verification checks ensure quoted evidence matches the extracted page content before it is accepted
+- The model may use only the supplied pages, never outside knowledge. Page text is treated as untrusted data.
+- Every requirement must carry a quote copied verbatim from a cited page. The quote is checked in code against the fetched text (a loose match ignoring case and punctuation), and failures are rejected.
+- Topic status comes from what was verified, not from the model's own claim: `confirmed`, `partial`, `not_found`, or `error`.
+- Workflow items are labeled `verified` (a page quote checked out), `inferred` (the model reasoned beyond the pages) or `unverified` (it claimed a source that did not check out).
+- Time and wait estimates are labeled `verified` only when a page states them; otherwise they are marked as estimates.
+- Missing information is listed as a gap, never filled from memory. Pages that failed to fetch are listed, because related gaps may be unknown rather than absent.
+
+### Totals
+
+`workflow.totals` includes approval counts (always vs conditional), active time for the minimum setup and the full production path, and approval wait ranges. Sums assume steps run one after another, so treat them as rough bounds.
+
+## Safety notes for user input
+
+- Document URLs, seeds and domains must be public `https` URLs on real public hostnames (no IP literals, `localhost` or private suffixes such as `.internal`).
+- Cicerone never fetches a user-supplied URL itself. Only Tavily does, so there is no server-side path to internal hosts.
+- A `doc_url` outside a registry provider's official domains is ignored with a warning.
+
+## Job queue behavior
+
+Jobs run in an in-process thread pool (`oauth_research/tasks.py`):
+
+| Setting | Value |
+|---|---|
+| Concurrent jobs | 2 |
+| Running plus queued, maximum | 10 (then `503`) |
+| Job retention in cache | 24 hours |
+| Stale-job cutoff | 30 minutes without a progress update, then reported as `failed` |
+
+Invalid input is rejected when the job is created, so the view can return `400` straight away.
 
 ## Current limitations
 
-- This is a backend-only implementation
-- No persistent database storage is used yet
-- The job runner is in-process and designed for local or lightweight async processing
-- Future improvements may include Celery, Redis, and scheduled job persistence
+- **Process-local limits:** the pending-job counter is per process, so with N web workers the effective cap is N times higher.
+- **Threads die with the process:** a restart loses running jobs, and they show as `failed` once the stale cutoff passes.
+- **Cache size:** the whole result, Markdown included, is stored in the cache. Backends with small value limits (Memcached defaults to 1 MB) can silently drop large results.
+- **Stale detection:** the timestamp only updates on stage changes, so a very slow model stage (up to 5 attempts of 180 seconds each) can approach the 30-minute cutoff.
+- **No persistence:** results expire with the cache, and intermediate artifacts are not stored.
+- **Auth and throttling are not enabled yet** (see above).
 
-## Development notes
-
-The app currently keeps only the final output in memory for the request lifecycle and does not persist intermediate artifacts.
+Future work could move `_run_job` into a Celery or RQ task for restart-safe, multi-machine execution (`create_job` and `get_job` can stay the same) and persist results to a database.
 
 ## Running tests
 
@@ -205,15 +286,20 @@ pipenv run python manage.py test oauth_research
 # start the server
 pipenv run python manage.py runserver 0.0.0.0:8000
 
-# request a job
+# preview what would be fetched, without model calls
+curl -X POST http://127.0.0.1:8000/api/research/ \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"github","dry_run":true}'
+
+# run the full research
 curl -X POST http://127.0.0.1:8000/api/research/ \
   -H "Content-Type: application/json" \
   -d '{"provider":"github"}'
 
-# poll the job status
+# poll until "finished" is true
 curl http://127.0.0.1:8000/api/jobs/<job_id>/status/
 ```
 
 ## License
 
-This project is currently in active development and is intended for internal use and experimentation.
+This project is in active development and intended for internal use and experimentation.
