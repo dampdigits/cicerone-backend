@@ -8,6 +8,10 @@ django = "*"
 djangorestframework = "*"
 requests = "*"
 tavily-python = "*"
+whitenoise = {extras = ["brotli"], version = "*"}
+python-decouple = "*"
+django-cors-headers = "*"
+gunicorn = "*"
 
 [dev-packages]
 

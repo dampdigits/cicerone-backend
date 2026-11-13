@@ -1,29 +1,55 @@
 import os
 from pathlib import Path
+from decouple import config, Csv
+from django.core.management.utils import get_random_secret_key
 
+
+PROJECT_NAME = config('PROJECT_NAME', cast=str, default='Unset Project Name')
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+REPO_DIR = BASE_DIR.parent
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-key")
-DEBUG = os.getenv("DEBUG", "1") == "1"
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",") if os.getenv("ALLOWED_HOSTS") else ["*"]
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = config('DJANGO_SECRET_KEY', cast=str, default=get_random_secret_key())
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") or os.getenv("OPENROUTER_MODEL") or "GPT-6-Luna"
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = config('DJANGO_DEBUG', cast=bool, default=False)
+
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv(), default="")
+CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', cast=Csv(), default="")
+CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv(), default="")
+
+if DEBUG:
+  ALLOWED_HOSTS = ['*']
+  CSRF_TRUSTED_ORIGINS = ['http://localhost:8000']
+
+# For HTTPS
+CSRF_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
+
+# Third Party API settings
+TAVILY_API_KEY = config('TAVILY_API_KEY', cast=str, default='')
+OPENROUTER_API_KEY = config('OPENROUTER_API_KEY', cast=str, default='')
+OPENROUTER_MODEL = config('OPENROUTER_MODEL', cast=str, default='gpt-6-luna')
+OPENROUTER_BASE_URL = config('OPENROUTER_BASE_URL', cast=str, default='https://openrouter.ai/api/v1')
 
 INSTALLED_APPS = [
+    'corsheaders',
+
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+
     "rest_framework",
     "oauth_research",
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
+
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -31,6 +57,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+
+    "whitenoise.middleware.WhiteNoiseMiddleware",
 ]
 
 ROOT_URLCONF = "cicerone.urls"
@@ -79,7 +107,10 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "/static/"
+STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'static'
+STATIC_ROOT.mkdir(exist_ok=True, parents=True)
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
