@@ -55,7 +55,8 @@ class ResearchAPIView(APIView):
         job_payload = {k: data.get(k) for k in (
             "provider", "doc_url", "domains", "seeds", "select_paths", "exclude_paths", "max_urls", "dry_run")}
         try:
-            job_id = create_job(job_payload, owner=str(request.user.pk))
+            owner = str(request.user.pk) if request.user.is_authenticated else None
+            job_id = create_job(job_payload, owner=owner)
         except ValueError as exc:  # the pipeline rejected the provider name or similar
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except JobQueueFull as exc:
@@ -73,7 +74,8 @@ class JobStatusView(APIView):
     permission_classes = []
 
     def get(self, request, job_id, *args, **kwargs):
-        job = get_job(str(job_id), owner=str(request.user.pk))  # None for unknown, expired or someone else's job
+        owner = str(request.user.pk) if request.user.is_authenticated else None
+        job = get_job(str(job_id), owner=owner)  # None for unknown, expired or someone else's job
         if not job:
             return Response({"detail": "job not found."}, status=status.HTTP_404_NOT_FOUND)
 

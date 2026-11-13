@@ -508,7 +508,7 @@ def _empty_workflow() -> dict:
 
 class ResearchPipeline:
     DEFAULT_MAX_URLS = 30
-    MAP_OPTS = dict(max_depth=2, max_breadth=40, limit=80)
+    MAP_OPTS = dict(max_depth=2, max_breadth=40, limit=80, timeout=60)
     EXTRACT_BATCH = 20
     MIN_PAGE_CHARS = 300
     PAGES_PER_CALL = 3          # pages sent to the model per topic pass
@@ -666,13 +666,23 @@ class ResearchPipeline:
         def search(topic: str):
             return topic, self._tavily(f"search[{topic}]", "search",
                                        query=f"{self.provider_name} OAuth {TOPICS[topic]['query']}",
-                                       search_depth="advanced", max_results=5, include_domains=domains)
+                                       search_depth="advanced", max_results=5, include_domains=domains,
+                                       timeout=60)
 
         with ThreadPoolExecutor(max_workers=self.WORKERS) as ex:
-            for fut in as_completed([ex.submit(search, t) for t in TOPICS]):
-                topic, r = fut.result()
-                for x in (r or {}).get("results", []):
-                    add(x.get("url"), "search", x.get("title"), topic, x.get("score"))
+            futures = [ex.submit(search, t) for t in TOPICS]
+            try:
+                for fut in as_completed(futures, timeout=300):
+                    try:
+                        topic, r = fut.result(timeout=10)
+                    except Exception as exc:
+                        self._error(f"search future failed: {exc}")
+                        continue
+                    self.progress("discovering", f"searched {topic}")
+                    for x in (r or {}).get("results", []):
+                        add(x.get("url"), "search", x.get("title"), topic, x.get("score"))
+            except TimeoutError:
+                self._error("discovering: overall search timeout (300s) exceeded; continuing with partial results")
 
         for seed in cfg["seeds"]:
             self.progress("discovering", f"mapping {seed}")

@@ -22,6 +22,7 @@ CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv(), default="")
 if DEBUG:
   ALLOWED_HOSTS = ['*']
   CSRF_TRUSTED_ORIGINS = ['http://localhost:8000']
+  CORS_ALLOW_ALL_ORIGINS=True
 
 # For HTTPS
 CSRF_COOKIE_SECURE = not DEBUG
